@@ -1,0 +1,1864 @@
+---
+title: "Automated experiment running"
+output:
+  html_document:
+    df_print: paged
+---
+This notebook contains all information for running a full session, including practice sessions. Chunks must be run one by one. Here is a numbered index of what is performed in each chunk:
+
+1. Load packages, set parameters for calculations and provide login info for adhocmarkets.
+2. Parameters for manual trading, including info for adhocmarkets manual session and start the practice round for manual trading.
+3. Stop the practice round and process data.
+4. Run the two manual rounds (data will be automatically processed and uploaded to the shared Excel files).
+5. Parameters for the algo rounds and start algo practice round.
+6. Stop algo practice round and process data.
+7. Run algo real rounds, collect and process data.
+8. Generate payoff with internal or external draws vector.
+
+There is a first chunk (0) to be run for setup of the entire notebook. It can be run before the experiment starts
+
+### Chunk 0 
+Must modify the path to all experiment-specific files:
+
+- For practicing today, it is "GroupPractice"
+- For today's session, it is "BoF_SSession1_210707"
+
+```{r setup, cache = FALSE, include=FALSE}
+#rm(list = ls())
+#exppath<- '/BoF_SSession3_210721' # write appropriate expname here
+#knitr::opts_knit$set(root.dir = paste0(normalizePath(".", winslash = '/'), exppath))
+#getwd()
+```
+
+### Chunk 1 - session parameters
+Chunk 1 should be run once we have the signup file
+
+Parameters to set:
+
+- Login information: "account|email", "password"  (already set)
+- Number of the manual treatment marketplace (1109), and the algos treatment marketplace (1096)
+- Duration of manual rounds (60 seconds for practice, 10 minutes for real)
+- Duration of pause between rounds to give feedback (60 second for practice, 120 seconds for real)
+- Duration of algo rounds (120 seconds for practice, 10 minutes for real)
+- If we pause inside a round (not currently enabled), the length in seconds of the pause is 30, 4 pauses
+
+```{r Chunk1}
+# Packages
+library(dplyr)
+library(xlsx)
+library(httr)
+
+# PARAMETERS OF UTILITY FUNCTION
+b<- 0.003
+meanD<- c(1,1)
+varD<- matrix(c(2/3, -1/3, -1/3, 2/3), nrow = 2)
+
+# PARAMETERS FOR PAYMENT
+perfpay<- 15
+showup<- 20
+
+# LOAD SIGNUP INFO: MATCH EMAILS WITH NAMES
+lns <- readLines("Setup_Manual.csv")
+gg<- which(grepl('# holdings', lns))
+hlns<- lns[(gg[1]+1):(gg[2]-1)]
+holds<- read.table(text = hlns, sep = ',', header = TRUE)
+holds<- select(holds, email)
+qsignup<- read.xlsx('signup.xlsx', sheetIndex = 1)
+qsignup<- qsignup[!(is.na(qsignup$email)),]
+signup<- full_join(qsignup, holds, by = 'email')
+# Create even-odd indicator
+signup$number<- 0
+auxeo<- strsplit(signup$email, "")
+for(i in 1:(length(auxeo))){
+  indi<- grep("[0-9]", auxeo[[i]])
+  signup$number[i]<- as.numeric(ifelse(length(indi)>0, substr(signup$email[i], min(indi), max(indi)), -10))
+}
+signup<- mutate(signup, evodd = ifelse(grepl('uleef', email) == TRUE, -10, ifelse((number %% 2) == 0, "even", "odd")))
+btsubs<- sum(is.na(signup$Name) == FALSE)
+
+# Create dataframe to keep track of effective round duration and final waiting times
+ttracker<- data.frame(elapsed = numeric(10), pelapsed = numeric(10), take5 = numeric(10), xe = numeric(10))
+
+# PARAMETERS FOR CONTROLLING ADHOCMARKETS
+ManD<- 600 # Duration, in seconds, of manual rounds 600
+AlgD<- 240 # Duration, in seconds, of algo rounds 240
+PauseD<- 30 # Duration, in seconds, of pauses, if any 30
+Npause<- 1 # How many pauses in the round
+InterD<- 60 # Time between two rounds(for feedback, etc. Counts after all calculations performed) 60
+payshowD<- 15 # Time to display previous round payoff 15 seconds is fine
+# From above parameters, determine actual duration in between pauses:
+AlgEffD<- AlgD/(Npause+1)
+
+login<- authenticate("account|email", "password")  
+
+marketplaceNo<- "1134" 
+AmarketplaceNo<- "1130"
+
+```
+
+### Chunk 2: start the practice round 
+We load initial holdings to be sure all is kosher at the beginning of the manual rounds. Must do this only once.
+
+```{r Chunk2}
+# hero is the basic path for our market - only market number must change as we run different sessions
+hero<- paste0("https://fm-data.herokuapp.com/api/marketplaces/", marketplaceNo) # Modify the market number only to the right number when running
+# marketin is the path to the setup file relevant for the manual sessions
+marketin<- "Setup_Manual.csv"
+
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+# Start the round
+xx<- PATCH(paste0(hero, '/open'), config = login)
+```
+
+**IMPORTANT:** Time should be counted manually until we wish to stop it. At that point, run the next chunk to stop practice and process data.
+
+### Chunk 3: stop the practice round
+```{r Chunk3}
+# STOP the practice round
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# GET DATA
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+# GET holdings data
+qgg<- grep('# holdings', polk[[1]]) 
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# GET orders data
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+
+write.csv(holdtbl, 'Holdings_Practice.csv', row.names = FALSE)
+write.csv(ordtbl, 'Orders_Practice.csv', row.names = FALSE)
+
+### IMPORTANT: CHECK WHO'S TRULY THERE - COMPARE WITH SIGNUP LIST ###
+Presencetbl<- left_join(holdtbl, signup, by = 'email')
+Presencetbl<- select(Presencetbl, email, owner, name, cash, Name, number, evodd)
+ordsub<- unique(ordtbl$email)
+Presencetbl<- mutate(Presencetbl, su.there = ifelse(is.na(Name), 0, 1), ord.there = ifelse(email %in% ordsub, 1, 0))
+Presencetbl<- mutate(Presencetbl, Errors = ifelse(su.there - ord.there == 1, 'ONLY SIGNUP',
+                                                  ifelse(su.there - ord.there == -1, 'ONLY ORDERS', 'OK')))
+write.xlsx(Presencetbl, 'Presence.xlsx', row.names = FALSE)
+select(Presencetbl, email, Name, evodd, su.there, ord.there, Errors)
+```
+
+#### BODY OF EXPERIMENT ####
+### Chunk 4: Start the two manual rounds, with time delay in between
+**IMPORTANT:** While running, the signup file must be closed locally, else it will not allow modifications.
+
+Modify the object "leftbeforemanual" below to contain a list of subjects who left before the manual rounds.
+
+```{r Chunk4}
+### ENTER ID "M#" OF SUBJECT WHO LEFT EXPERIMENT HERE
+leftbeforemanual<- NULL # SOME EXAMPLES: leftbeforemanual<- "M01", leftbeforemanual<- c('M01', 'M05')
+
+hero<- paste0("https://fm-data.herokuapp.com/api/marketplaces/", marketplaceNo) # Modify the market number only 
+
+signup<- signup[!(is.na(signup$email)),]
+if(!(is.null(leftbeforemanual))){
+  signup[signup$email %in% paste0(leftbeforemanual, '@utah.edu'), 'Name']<- NA
+  signup[signup$email %in% paste0(leftbeforemanual, '@utah.edu'), grep('Payoff', names(signup))]<- NA
+}
+totalsubs<- sum(is.na(signup$Name) == FALSE)
+
+# Run the round
+Round<- 1
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    if(elapsed>=ManD){
+      yy<- PATCH(paste0(hero,'/close'), config = login)
+      Mstatus = 'CLOSED'
+    }
+  }
+  ManD - elapsed
+  take5<- min(10, max(0,ManD - elapsed))
+  Sys.sleep(take5)
+}
+
+ttracker$elapsed[Round]<- elapsed
+ttracker$take5[Round]<- take5
+
+### Get the data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]]) # Now use same lines a
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# Get orders and save holdings and orders for the round
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)]),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)]))
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+### Save remaining info and breath between rounds
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save holdings and orders for the round
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+
+# PAUSE!
+# IMPORTANT: this could be made event-dependent, but it is not clear to me whether we'd prefer to have the chance to start sooner or later than wanted (perhaps later!). So not clear what to make it dependent on...
+Sys.sleep(InterD)
+#
+
+
+# ROUND 2 - MANUAL
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+Round<- 2
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    if(elapsed>=ManD){
+      yy<- PATCH(paste0(hero,'/close'), config = login)
+      Mstatus = 'CLOSED'
+    }
+  }
+  take5<- min(10, max(0,ManD - elapsed))
+  Sys.sleep(take5)
+}
+
+ttracker$elapsed[Round]<- elapsed
+ttracker$take5[Round]<- take5
+
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]]) # Now use same lines a
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# Get orders and save holdings and orders for the round
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)]),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)]))
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+### Save remaining info and breath between rounds
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+file.copy('signup.xlsx', 'signupsofar.xlsx')
+# Save holdings and orders for the round
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+```
+
+### Chunk 5: start practice round 1 for algos
+We change markets, load the setup (same as for manual), and start the practice for an arbitrary period of time.
+**Remember** to tell students to change markets.
+
+```{r Chunk5}
+# Change "hero" to the right market
+hero<- paste0("https://fm-data.herokuapp.com/api/marketplaces/", AmarketplaceNo) 
+
+# marketin is the path to the setup file relevant for the manual sessions
+marketin<- "Setup_Algos_Practice.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+# Start the round
+xx<- PATCH(paste0(hero, '/open'), config = login)
+```
+
+
+### Chunk 6: stop the practice round 1 for algos
+
+```{r Chunk6}
+# STOP the round
+yy<- PATCH(paste0(hero,'/close'), config = login)
+```
+
+
+### Chunk 7: start the practice round 2 for algos
+
+```{r Chunk 7}
+# Start the round
+xx<- PATCH(paste0(hero, '/open'), config = login)
+```
+
+
+### Chunk 8: stop the practice round 2 for algos
+
+```{r Chunk8}
+# STOP the round
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# If we want practice round payoff info:
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$PayoffP<- U - Ui
+
+signupp<- full_join(signup, transtbl[, c('email', 'PayoffP')], by = 'email')
+# Get orders and save holdings and orders for the round
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+ordsub<- unique(ordtbl$email)
+
+feedbackp<- data.frame(mean.payoff = mean(signupp[signupp$email %in% ordsub, 'PayoffP'], na.rm = TRUE),
+                       median.payoff = median(signupp[signupp$email %in% ordsub, 'PayoffP'], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(feedbackp)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+write.xlsx(feedbackp, 'feedback.xlsx', row.names = FALSE, sheetName = 'Practice_Algo', append = TRUE)
+write.csv(holdtbl, 'Holdings_AlgoP.csv', row.names = FALSE)
+write.csv(ordtbl, 'Orders_AlgoP.csv', row.names = FALSE)
+
+```
+
+### Chunk 9: Launch all algo rounds non stop
+This will run all algo rounds, generate feedback and store payoff information as we go.
+
+**IMPORTANT:** Our program can only determine number of bots who participated in markets! (Inactive takers will be missed)
+
+**TESTED WITH PAUSES:** All works great
+
+Modify object "leftbeforealgo" to list any students that might have left between the start of the manual rounds and the start of the algo round. 
+
+```{r Chunk9}
+### ENTER ID "M#" OF SUBJECT WHO LEFT EXPERIMENT HERE
+leftbeforealgo<- NULL # SOME EXAMPLES: leftbeforealgo<- "M01", leftbeforealgo<- c('M01', 'M05')
+
+# Change "hero" to the right market (Done in chunk 5, but just in case...)
+#hero<- paste0("https://fm-data.herokuapp.com/api/marketplaces/", AmarketplaceNo) 
+
+# Reload signup so we don't run into trouble
+if(file.exists('signupsofar.xlsx')){
+  signup<- read.xlsx('signupsofar.xlsx', sheetName = 'Round2')
+  file.remove('signup.xlsx')
+  file.copy('signupsofar.xlsx', 'signup.xlsx')
+}
+signup<- signup[!(is.na(signup$email)),]
+if(!(is.null(leftbeforealgo))){
+  signup[signup$email %in% paste0(leftbeforealgo, '@utah.edu'), 'Name']<- NA
+  signup[signup$email %in% paste0(leftbeforealgo, '@utah.edu'), grep('Payoff', names(signup))]<- NA
+}
+totalsubs<- sum(is.na(signup$Name) == FALSE)
+
+# Post appropriate setup file
+# marketin is the path to the setup file relevant for the manual sessions
+marketin<- "Setup_Algos_R3_4.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+# Run rounds 3 and 4
+### ROUND 3 ###
+# Run the round
+# Start round, record starting time
+Round<- 3
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+
+# PAUSE!
+Sys.sleep(InterD)
+#
+
+
+### ROUND 4 ###
+# Run the round
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+# Start round, record starting time
+Round<- 4
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+
+## ROUNDS 5 AND 6 ##
+# Load new market setup for rounds 5 and 6
+# marketin is the path to the setup file relevant for the manual sessions
+marketin<- "Setup_Algos_R5_6.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+# PAUSE!
+Sys.sleep(InterD)
+#
+
+### ROUND 5 ###
+# Run the round
+# Start round, record starting time
+Round<- 5
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+
+# PAUSE!
+Sys.sleep(InterD)
+#
+
+
+### ROUND 6 ###
+# Run the round
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+# Start round, record starting time
+Round<- 6
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+## ROUNDS 7 AND 8 ##
+# Load new market setup for rounds 7 and 8
+# marketin is the path to the setup file relevant for the manual sessions
+marketin<- "Setup_Algos_R7_8.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+
+# PAUSE!
+Sys.sleep(InterD)
+#
+
+
+### ROUND 7 ###
+# Run the round
+# Start round, record starting time
+Round<- 7
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+
+# PAUSE!
+Sys.sleep(InterD)
+#
+
+
+### ROUND 8 ###
+# Run the round
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+# Start round, record starting time
+Round<- 8
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+
+## ROUNDS 9 AND 10 ##
+# Load new market setup for rounds 9 and 10
+# marketin is the path to the setup file relevant for the manual sessions
+marketin<- "Setup_Algos_R9_10.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+# PAUSE!
+Sys.sleep(InterD)
+#
+
+
+### ROUND 9 ###
+# Run the round
+# Start round, record starting time
+Round<- 9
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+
+# PAUSE!
+Sys.sleep(InterD)
+#
+
+
+### ROUND 10 ###
+# Run the round
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+# Start round, record starting time
+Round<- 10
+np<- 0
+xx<- PATCH(paste0(hero, '/open'), config = login)
+start.time<- Sys.time()
+ptime<- start.time
+Mstatus<- 'OPEN'
+
+# Check market status regularly
+while(Mstatus == 'OPEN'){
+  aux<- GET(paste0(hero, '/currentSession'), config = login)
+  slist<- strsplit(content(aux, 'text', encoding = "UTF-8"), '\n')
+  sentry<- slist[[1]][grep('state', slist[[1]])]
+  Mstatus<- trimws(gsub('state', '', gsub("[^[:alnum:]]", " ", sentry)))
+  if(Mstatus == 'OPEN'){
+    elapsed<- difftime(Sys.time(), start.time, units = 'secs')
+    pelapsed<- difftime(Sys.time(), ptime, units = 'secs')
+    if(pelapsed >= AlgEffD){
+      if(elapsed>= (AlgD + np*PauseD)){
+        yy<- PATCH(paste0(hero,'/close'), config = login)
+        Mstatus = 'CLOSED'
+      }else{
+        yy<- PATCH(paste0(hero,'/pause'), config = login)
+        np<- np+1
+        Sys.sleep(PauseD)
+        xx<- PATCH(paste0(hero, '/open'), config = login)
+        ptime<- Sys.time()
+      }
+    }
+  }
+  take5<- min(10, max(0, AlgEffD- pelapsed))
+  Sys.sleep(take5)
+}
+ttracker$elapsed[Round]<- elapsed
+ttracker$pelapsed[Round]<- pelapsed
+ttracker$take5[Round]<- take5
+
+# Get data and process it
+zz<- GET(paste0(hero,"/holdings/downloads"), config = login)
+yolk<- content(zz, 'text')
+polk<- strsplit(yolk, '\n')
+qgg<- grep('# holdings', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+holdtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+transtbl<- select(holdtbl, email, owner, marketplace, name, cash, cash__initial,
+                  names(holdtbl)[grep("A_", names(holdtbl))[1:2]],
+                  names(holdtbl)[grep("B_", names(holdtbl))[1:2]])
+names(transtbl)[grep("A_", names(transtbl))]<- c('A', 'A.i')
+names(transtbl)[grep("B_", names(transtbl))]<- c('B', 'B.i')
+Xi<- as.matrix(transtbl[,c('A.i','B.i')])
+ci<- as.matrix(transtbl$cash__initial)/100
+Ui<- Xi %*% meanD - b*as.matrix(diag((Xi%*% varD) %*% t(Xi))) +ci
+
+X<- as.matrix(transtbl[,c('A','B')])
+c<- as.matrix(transtbl$cash)/100
+U<- X %*% meanD - b*as.matrix(diag((X%*% varD) %*% t(X))) +c
+transtbl$npay<- U - Ui
+
+# For bots, do the same with orders - get last occurrence, parse robot types and spreads + manual trades
+qgg<- grep('# orders', polk[[1]])
+gg<- sort(qgg)
+bot<- gg[length(gg)-1]+1
+top<- gg[length(gg)]-1
+pretab<- rbind(polk[[1]][bot:top])
+ordtbl<- read.table(text = pretab, sep = ',', header = TRUE)
+# Be sure to get correct client description for each agent:
+unord<- ordtbl[ordtbl$order == ordtbl$original,]
+bots<- distinct(unord, email, clientDescription)
+bots$type<- substr(bots$clientDescription, 1, 5)
+bbots<- bots[bots$type != 'fm-ui',]
+if(dim(bbots)[1]>0){
+  bbots<- left_join(bbots, signup[, c('email', 'evodd')], by = 'email')
+  counter<- bbots %>% group_by(evodd) %>% summarise(tcount = sum(type == 'taker'), mcount = sum(type == 'maker'))
+}else{
+  counter<- as.data.frame(matrix(nrow = 0, ncol = 0))
+}
+
+## Get payoff info with exchange rate
+ordsub<- unique(ordtbl$email)
+totalsubs<- max(totalsubs, length(ordsub))
+transtbl[transtbl$npay<0, 'npay']<- 0
+den<- sum(transtbl$npay, na.rm = TRUE)
+if(den >0){
+  xe<- perfpay*totalsubs/den
+  transtbl$xepay<- xe*transtbl$npay
+}else{
+  xe<- 1
+  transtbl$xepay<- transtbl$npay
+}
+
+ttracker$xe[Round]<- xe
+
+signup<- full_join(signup, transtbl[, c('email', 'npay', 'xepay')], by = 'email')
+names(signup)[names(signup) == 'npay']<- paste0('Payoff', Round)
+names(signup)[names(signup) == 'xepay']<- paste0('xePay', Round)
+
+nfeedback<- data.frame(mean.payoff = mean(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       median.payoff = median(signup[signup$email %in% ordsub, paste0('xePay', Round)], na.rm = TRUE),
+                       mcount = ifelse(dim(counter[counter$evodd == 'odd', 'mcount'])[1]>0, counter[counter$evodd == 'odd', 'mcount'], 0),
+                       mcount1 = ifelse(dim(counter[counter$evodd == 'even', 'mcount'])[1]>0, counter[counter$evodd == 'even', 'mcount'], 0),
+                       tcount = ifelse(dim(counter[counter$evodd == 'odd', 'tcount'])[1]>0, counter[counter$evodd == 'odd', 'tcount'], 0),
+                       tcount1 = ifelse(dim(counter[counter$evodd == 'even', 'tcount'])[1]>0, counter[counter$evodd == 'even', 'tcount'], 0),
+                       all.makers = sum(counter$mcount), all.takers = sum(counter$tcount),
+                       manual.orders = ifelse(any(bots$type == 'fm-ui'), 'Yes', 'No'))
+names(nfeedback)[3:6]<- c('odd.makers', 'even.makers', 'odd.takers', 'even.takers')
+
+assign(paste0('feedback', Round), nfeedback)
+
+### Save feedback
+write.xlsx(nfeedback, 'feedback.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+
+### Load the payoff info and show, while feedback file updates
+outholds<- left_join(holdtbl, transtbl[, c('email', 'xepay')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(xepay), cash__initial, round(xepay*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+# Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("TRUE", dim(finbase)[1])
+fvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep("(?=.*A_)(?=.*buy)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*A_)(?=.*sell)", names(finbase), perl = TRUE)]<- tvec
+finbase[ , grep("(?=.*B_)(?=.*buy)", names(finbase), perl = TRUE)]<- fvec
+finbase[ , grep("(?=.*B_)(?=.*sell)", names(finbase), perl = TRUE)]<- fvec
+# Merge feedback into the right format file
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+# Load and run ficticious round
+payoffin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(payoffin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+Sys.sleep(payshowD)
+yy<- PATCH(paste0(hero,'/close'), config = login)
+
+# OUTPUT: PAYOFF INFO TO ACCUMULATE IN DRIVE
+write.xlsx(signup, 'signup.xlsx', row.names = FALSE, sheetName = paste0('Round', Round), append = TRUE)
+# Save this period's output from marketplace to "Output_Round_X"
+write.csv(holdtbl, paste0('Holdings_R', Round, '.csv'), row.names = FALSE)
+write.csv(ordtbl, paste0('Orders_R', Round, '.csv'), row.names = FALSE)
+
+```
+
+### Chunk 10: Generate payoffs using external choice of periods
+You must set the value of vector "payperiods" and that of "survive" (optional).
+
+```{r Chunk10}
+### ENTER CHOSEN ROUNDS HERE
+payperiods<- c(3,9) # this is just an example.
+
+Pays<- select(signup, 1:5, paste0('xePay', payperiods[1]), paste0('xePay', payperiods[2]))
+names(Pays)[6:7]<- c('xePay1', 'xePay2')
+Pays<- mutate(Pays, Total.Payoff = xePay1+xePay2, Total.with.Showup = xePay1+xePay2+showup)
+
+outholds<- left_join(holdtbl, Pays[, c('email', 'Total.Payoff')], by = 'email')
+outholds<- mutate(outholds, ncashin = ifelse(is.na(Total.Payoff), cash__initial, round(Total.Payoff*100, 0)))
+finbase<- holdtbl
+finbase[,8]<- outholds$ncashin
+
+### Write in capital "TRUE" for buy and sell privileges - part of format of file to import in flexemarkets
+tvec<- rep("FALSE", dim(finbase)[1])
+finbase[ , grep('buy', names(finbase))]<- tvec
+finbase[ , grep('sell', names(finbase))]<- tvec
+
+file.remove('finalin.csv')
+file.copy('finalin_empty.csv', 'finalin.csv')
+write.table(finbase, 'finalin.csv', sep = ',', append = TRUE, quote = FALSE, row.names = FALSE)
+#write.table(headpart, 'finalin.csv', quote = FALSE, row.names = FALSE, col.names = FALSE)
+write.table(('# holdings -- end,,,,,,,,,,,,,,,,,'), 'finalin.csv', append = TRUE, quote = FALSE, row.names = FALSE, col.names = FALSE)
+
+# Load and run fictitious round
+marketin<- "finalin.csv"
+# Load the setup file
+myp<- POST(paste0(hero, '/holdings/uploads'), config = login, body = list(file = upload_file(marketin)), encode = 'multipart')
+
+xx<- PATCH(paste0(hero, '/open'), config = login)
+
+write.xlsx(Pays, 'Payment.xlsx', row.names = FALSE)
+
+```
+
+
+### Final chunk to close payoff showing
+```{r Final}
+yy<- PATCH(paste0(hero,'/close'), config = login)
+write.csv(ttracker, 'TrackerInfo.csv', row.names = FALSE)
+```
+
+
